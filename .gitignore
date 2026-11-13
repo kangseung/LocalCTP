@@ -8,3 +8,5 @@ libthosttraderapi_se_v*.so
 
 # Debug folder
 Debug
+compile_commands.json
+.cache/

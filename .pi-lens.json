@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/apmantza/pi-lens/master/docs/schema/pi-lens-config-v1.json",
+  "rules": {
+    "c-hardcoded-secrets": {
+      "ignorePaths": ["LocalCTP/ctpStatus.h"]
+    },
+    "no-reserved-identifiers": {
+      "ignorePaths": ["LocalCTP/ctp_file/"]
+    }
+  }
+}

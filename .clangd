@@ -1,0 +1,7 @@
+CompileFlags:
+  CompilationDatabase: .
+  Add:
+    - -ILocalCTP/ctp_file/current
+    - -ILocalCTP/auto_generated_code
+    - -ILocalCTP/sqlite
+    - -ILocalCTP
