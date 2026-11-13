@@ -1,5 +1,10 @@
 ﻿#include "stdafx.h"
 
+#ifndef _WIN32
+#include <iconv.h>
+#include <cerrno>
+#endif
+
 namespace localCTP
 {
     using CovtByNm = CodecvtByname<wchar_t, char, mbstate_t>;
@@ -33,23 +38,71 @@ namespace localCTP
         return wcPtr;
     }
 
+#ifndef _WIN32
+    //Linux 下通常没有安装 GBK 相关的 locale, codecvt_byname 会抛 locale::facet::_S_create_c_locale name not valid.
+    //因此 Linux 下改用 iconv 做 GB18030 <-> UTF-8 转换(GB18030 是 GBK 的超集).
+    static std::string iconvConvert(const char* fromCharset, const char* toCharset, const std::string& str)
+    {
+        iconv_t cd = iconv_open(toCharset, fromCharset);
+        if (cd == (iconv_t)-1)
+        {
+            throw std::runtime_error("iconv_open failed: " + std::string(fromCharset) + " -> " + toCharset);
+        }
+        std::string result(str.size() * 2 + 16, '\0');
+        char* inPtr = const_cast<char*>(str.c_str());
+        size_t inLeft = str.size();
+        char* outPtr = &result[0];
+        size_t outLeft = result.size();
+        for (;;)
+        {
+            const size_t ret = iconv(cd, &inPtr, &inLeft, &outPtr, &outLeft);
+            if (ret != (size_t)-1)
+            {
+                break;
+            }
+            if (errno != E2BIG)
+            {
+                const std::string errMsg = "iconv failed: " + std::string(fromCharset) + " -> "
+                    + toCharset + ", errno:" + std::to_string(errno) + ", str:" + str;
+                iconv_close(cd);
+                throw std::runtime_error(errMsg);
+            }
+            const size_t used = outPtr - &result[0];
+            result.resize(result.size() * 2);
+            outPtr = &result[0] + used;
+            outLeft = result.size() - used;
+        }
+        result.resize(outPtr - &result[0]);
+        iconv_close(cd);
+        return result;
+    }
+#endif
+
 
 std::string gbk_to_utf8(const std::string& str)
 {
+#ifdef _WIN32
     static std::wstring_convert<CovtByNm> convert(getCovtByNm());
     std::wstring tmp_wstr = convert.from_bytes(str);
     static std::wstring_convert<std::codecvt_utf8<wchar_t>> cv2;
 
     return cv2.to_bytes(tmp_wstr);
+#else
+    return iconvConvert("GB18030", "UTF-8", str);
+#endif
 }
 
 std::string utf8_to_gbk(const std::string& str)
 {
+#ifdef _WIN32
     static std::wstring_convert<std::codecvt_utf8<wchar_t> > conv;
     std::wstring tmp_wstr = conv.from_bytes(str);
     static std::wstring_convert<CovtByNm> convert(getCovtByNm());
 
     return convert.to_bytes(tmp_wstr);
+#else
+    return iconvConvert("UTF-8", "GB18030", str);
+#endif
 }
 
 std::string base64_encode(unsigned char const* bytes_to_encode, unsigned int in_len)

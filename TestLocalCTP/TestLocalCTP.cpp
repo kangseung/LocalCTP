@@ -5,7 +5,57 @@
 #include <cstring>
 #include <string>
 #include <fstream> // std::ofstream
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include "ThostFtdcTraderApi.h"//CTP交易的头文件
+#include <iconv.h>
+#include <stdexcept>
+
+// 复制自 HS_HFT 的 iconv_convert(见 include/hs_hft_tools/hs_hft_tools.hpp),
+// 用于把 CTP 回调中的 GBK 字符串转成 UTF-8 后再打印.
+// 与示例的差异: 转换失败直接抛异常(不静默返回空串), 字符集用 GB18030(GB2312/GBK 的超集).
+class iconv_convert
+{
+public:
+    static std::string gbk_to_utf8(const std::string& strGBK)
+    {
+        const std::size_t length = strGBK.size() * 2 + 1;
+        std::string strResult(length, '\0');
+        if (code_convert("GB18030", "UTF-8", strGBK, &strResult[0], length) < 0)
+        {
+            throw std::runtime_error("iconv_convert::gbk_to_utf8 failed, str:" + strGBK);
+        }
+        strResult.resize(std::strlen(strResult.c_str()));
+        return strResult;
+    }
+
+private:
+    static int code_convert(const char* from_charset, const char* to_charset,
+        const std::string& strIn, char* outbuf, std::size_t outlen)
+    {
+        iconv_t cd = iconv_open(to_charset, from_charset);
+        // iconv_open 失败时返回 (iconv_t)-1 而非 0
+        if (cd == (iconv_t)-1)
+        {
+            return -1;
+        }
+        std::memset(outbuf, 0, outlen);
+        char* inbuf = const_cast<char*>(strIn.c_str());
+        char* outptr = outbuf;
+        std::size_t inlen = strIn.size();
+        std::size_t outleft = outlen - 1; // 保留 NUL 终止位
+        const int ret = iconv(cd, &inbuf, &inlen, &outptr, &outleft);
+        iconv_close(cd);
+        return (ret == (std::size_t)-1) ? -1 : 0;
+    }
+};
+
+// 打印 CTP 回调中的 GBK 字符串前统一转成 UTF-8
+inline std::string u8(const char* gbkStr)
+{
+    return iconv_convert::gbk_to_utf8(std::string(gbkStr));
+}
 CThostFtdcInputOrderField generateNewOrderMsg(const char* OrderRef, const char* InstrumentID = "MA401")
 {
     CThostFtdcInputOrderField InputOrder = { 0 };
@@ -50,6 +100,11 @@ int g_sessionID = 0;
 
 class MySpi : public CThostFtdcTraderSpi
 {
+public:
+    //界面/主线程需要等待认证回调完成后再发登录请求(回调由消息队列线程触发)
+    std::atomic<bool> m_authenticated{ false };
+
+private:
     void OnFrontConnected(){
         std::cout << "收到连接成功通知!" << std::endl;
         CThostFtdcReqAuthenticateField ReqAuthenticateField = { "9876", "TestUserID", "Test", "TestAuthCode", "TestAppID" };
@@ -57,43 +112,44 @@ class MySpi : public CThostFtdcTraderSpi
     }
     void OnRspAuthenticate(CThostFtdcRspAuthenticateField* pRspAuthenticateField, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
         std::cout << "收到认证响应! " << " UserID:" << pRspAuthenticateField->UserID
-            << " errorID:"<< pRspInfo->ErrorID<<" errorMsg:"<< pRspInfo->ErrorMsg << std::endl;
+            << " errorID:"<< pRspInfo->ErrorID<<" errorMsg:"<< u8(pRspInfo->ErrorMsg) << std::endl;
+        m_authenticated = true;
     }
     void OnRspUserLogin(CThostFtdcRspUserLoginField* pRspUserLogin, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
         std::cout << "收到登录响应! " << " UserID:" << pRspUserLogin->UserID
-            << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+            << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << " TradingDay:" << pRspUserLogin->TradingDay << std::endl;
         g_frontID = pRspUserLogin->FrontID;
         g_sessionID = pRspUserLogin->SessionID;
     }
     void OnRspQryInstrument(CThostFtdcInstrumentField* pInstrument, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
-        std::cout << "收到查询合约响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+        std::cout << "收到查询合约响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << ", bIsLast:" << bIsLast << std::endl;
         if (pInstrument)
         {
             std::cout << "InstrumentID:" << pInstrument->InstrumentID
                 << ", ExchangeID:" << pInstrument->ExchangeID
-                << ", InstrumentName:" << pInstrument->InstrumentName
+                << ", InstrumentName:" << u8(pInstrument->InstrumentName)
                 << ", PriceTick:" << pInstrument->PriceTick
                 << ", VolumeMultiple:" << pInstrument->VolumeMultiple
                 << std::endl;
         }
     }
     void OnRspQryClassifiedInstrument(CThostFtdcInstrumentField* pInstrument, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
-        std::cout << "收到查询分类合约响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+        std::cout << "收到查询分类合约响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << ", bIsLast:" << bIsLast << std::endl;
         if (pInstrument)
         {
             std::cout << "InstrumentID:" << pInstrument->InstrumentID
                 << ", ExchangeID:" << pInstrument->ExchangeID
-                << ", InstrumentName:" << pInstrument->InstrumentName
+                << ", InstrumentName:" << u8(pInstrument->InstrumentName)
                 << ", PriceTick:" << pInstrument->PriceTick
                 << ", VolumeMultiple:" << pInstrument->VolumeMultiple
                 << std::endl;
         }
     }
     void OnRspQryOrder(CThostFtdcOrderField* pOrder, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
-        std::cout << "收到查询报单响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+        std::cout << "收到查询报单响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << ", bIsLast:" << bIsLast << std::endl;
         if (pOrder)
         {
@@ -105,7 +161,7 @@ class MySpi : public CThostFtdcTraderSpi
         }
     }
     void OnRspQryTrade(CThostFtdcTradeField* pTrade, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
-        std::cout << "收到查询成交响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+        std::cout << "收到查询成交响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << ", bIsLast:" << bIsLast << std::endl;
         if (pTrade)
         {
@@ -117,7 +173,7 @@ class MySpi : public CThostFtdcTraderSpi
         }
     }
     void OnRspQryInvestorPosition(CThostFtdcInvestorPositionField* pInvestorPosition, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
-        std::cout << "收到查询持仓响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+        std::cout << "收到查询持仓响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << ", bIsLast:" << bIsLast << std::endl;
         if (pInvestorPosition)
         {
@@ -130,7 +186,7 @@ class MySpi : public CThostFtdcTraderSpi
         }
     }
     void OnRspQrySettlementInfo(CThostFtdcSettlementInfoField* pSettlementInfo, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
-        std::cout << "收到查询结算单响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg
+        std::cout << "收到查询结算单响应! " << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg)
             << ", bIsLast:" << bIsLast << std::endl;
         if (pSettlementInfo)
         {
@@ -141,7 +197,7 @@ class MySpi : public CThostFtdcTraderSpi
             o.flush();
 
             std::cout << "结算单 交易日:" << pSettlementInfo->TradingDay
-                << ", 消息正文:" << pSettlementInfo->Content
+                << ", 消息正文:" << u8(pSettlementInfo->Content)
                 << std::endl;
             
         }
@@ -149,13 +205,13 @@ class MySpi : public CThostFtdcTraderSpi
     void OnRspOrderInsert(CThostFtdcInputOrderField* pInputOrder, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
         std::cout << "\n收到(有错误的)报单响应! " << " UserID:" << pInputOrder->UserID
             << " InstrumentID:" << pInputOrder->InstrumentID
-            << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg << std::endl;
+            << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg) << std::endl;
     }
     void OnRtnOrder(CThostFtdcOrderField* pOrder) {
         std::cout << "\n收到报单通知! " << " UserID:" << pOrder->UserID
             << " InstrumentID:" << pOrder->InstrumentID
             << " OrderSysID:" << pOrder->OrderSysID
-            << " OrderStatus:" << pOrder->OrderStatus << " StatusMsg:" << pOrder->StatusMsg << std::endl;
+            << " OrderStatus:" << pOrder->OrderStatus << " StatusMsg:" << u8(pOrder->StatusMsg) << std::endl;
     }
     void OnRtnTrade(CThostFtdcTradeField* pTrade) {
         std::cout << "\n收到成交通知! " << " UserID:" << pTrade->UserID
@@ -167,7 +223,7 @@ class MySpi : public CThostFtdcTraderSpi
     void OnRspOrderAction(CThostFtdcInputOrderActionField* pInputOrderAction, CThostFtdcRspInfoField* pRspInfo, int nRequestID, bool bIsLast) {
         std::cout << "\n收到(有错误的)撤单响应! " << " UserID:" << pInputOrderAction->UserID
             << " InstrumentID:" << pInputOrderAction->InstrumentID
-            << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << pRspInfo->ErrorMsg << std::endl;
+            << " errorID:" << pRspInfo->ErrorID << " errorMsg:" << u8(pRspInfo->ErrorMsg) << std::endl;
     }
 
 };
@@ -185,6 +241,11 @@ int main()
 
     std::cout << "请输入任意数字以登录..." << std::endl;
     std::cin >> i;
+    //等待认证回调完成, 否则ReqUserLogin会因尚未认证而失败
+    while (!spi.m_authenticated)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     CThostFtdcReqUserLoginField ReqUserLoginField = { "", "9876", "TestUserID", "TestPassword" };
     pApi->ReqUserLogin(&ReqUserLoginField, 100);
     CThostFtdcQrySettlementInfoField QrySettlementInfo = { "9876", "TestUserID" };
