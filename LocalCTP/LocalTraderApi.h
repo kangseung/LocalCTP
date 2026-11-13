@@ -11,6 +11,12 @@
 #include <condition_variable>
 #include "Variant.hpp"
 
+//CTP v6.7.13 起 SubscribePrivateTopic 增加了 nSeqNo 参数, CreateFtdcTraderApi 增加了 bIsProductionMode 参数.
+//以 v6.7.13 新增的 THOST_FTDC_TPID_UseSMSVerify 常量作为版本判断依据.
+#ifdef THOST_FTDC_TPID_UseSMSVerify
+#define LOCALCTP_CTP_API_V6713_OR_LATER
+#endif
+
 #define COMPARE_MEMBER_MATCH(a, b, memberName) \
     (strlen(a->memberName) == 0 || strcmp((a->memberName),(b.memberName)) == 0)
 
@@ -525,7 +531,11 @@ public:
     ///        THOST_TERT_RESUME:从上次收到的续传
     ///        THOST_TERT_QUICK:只传送登录后私有流的内容
     ///@remark 该方法要在Init方法前调用。若不调用则不会收到私有流的数据。
+#ifdef LOCALCTP_CTP_API_V6713_OR_LATER
+    virtual void SubscribePrivateTopic(THOST_TE_RESUME_TYPE nResumeType, int nSeqNo = 1) override;
+#else
     virtual void SubscribePrivateTopic(THOST_TE_RESUME_TYPE nResumeType) override;
+#endif
 
     ///订阅公共流。
     ///@param nResumeType 公共流重传方式  

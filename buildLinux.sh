@@ -1,4 +1,4 @@
-#/bin/bash
+#!/bin/bash
 
 WORK_DIR=$(cd $(dirname $0); pwd)
 INSTALL_PATH=${WORK_DIR}/bin/linux
@@ -49,10 +49,13 @@ buildDemoFunc(){
 # v6.7.8
 #buildFunc 6.7.8
 
-# v6.5.1, put it at last, because we want the code to be set as v6.5.1 finally
-buildFunc 6.5.1
+# v6.7.13
+buildFunc 6.7.13
 
-cp ${INSTALL_PATH}/libthosttraderapi_se_v6.5.1.so ${INSTALL_PATH}/libthosttraderapi_se.so
+# v6.5.1, put it at last, because we want the code to be set as v6.5.1 finally
+#buildFunc 6.5.1
+
+cp ${INSTALL_PATH}/libthosttraderapi_se_v6.7.13.so ${INSTALL_PATH}/libthosttraderapi_se.so
 
 buildDemoFunc
 

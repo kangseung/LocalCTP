@@ -1227,7 +1227,11 @@ void CLocalTraderApi::saveOrderToDb(const CThostFtdcOrderField& order)
 ///创建TraderApi
 ///@param pszFlowPath 存贮订阅信息文件的目录，默认为当前目录
 ///@return 创建出的UserApi
+#ifdef LOCALCTP_CTP_API_V6713_OR_LATER
+CThostFtdcTraderApi* CThostFtdcTraderApi::CreateFtdcTraderApi(const char *pszFlowPath/* = ""*/, bool bIsProductionMode/* = true*/) {
+#else
 CThostFtdcTraderApi* CThostFtdcTraderApi::CreateFtdcTraderApi(const char *pszFlowPath/* = ""*/) {
+#endif
     if (CLocalTraderApi::trade_api_set.empty())
     {
         CLocalTraderApi::initInstrMap();
@@ -1577,7 +1581,11 @@ void CLocalTraderApi::RegisterSpi(CThostFtdcTraderSpi *pSpi) {
 ///        THOST_TERT_RESUME:从上次收到的续传
 ///        THOST_TERT_QUICK:只传送登录后私有流的内容
 ///@remark 该方法要在Init方法前调用。若不调用则不会收到私有流的数据。
+#ifdef LOCALCTP_CTP_API_V6713_OR_LATER
+void CLocalTraderApi::SubscribePrivateTopic(THOST_TE_RESUME_TYPE nResumeType, int nSeqNo) { return; }
+#else
 void CLocalTraderApi::SubscribePrivateTopic(THOST_TE_RESUME_TYPE nResumeType) { return; }
+#endif
 
 ///订阅公共流。
 ///@param nResumeType 公共流重传方式  
