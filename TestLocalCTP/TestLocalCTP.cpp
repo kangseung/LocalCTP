@@ -8,6 +8,8 @@
 #include <atomic>
 #include <thread>
 #include <chrono>
+#include <mutex>
+#include <map>
 #include "ThostFtdcTraderApi.h"//CTP交易的头文件
 #include <iconv.h>
 #include <stdexcept>
@@ -103,6 +105,11 @@ class MySpi : public CThostFtdcTraderSpi
 public:
     //界面/主线程需要等待认证回调完成后再发登录请求(回调由消息队列线程触发)
     std::atomic<bool> m_authenticated{ false };
+    //组合单分腿成交统计（--auto 模式的自检用）：按合约代码累加成交手数/条数
+    std::atomic<int> m_rtn_trade_count{ 0 };
+    std::mutex m_combo_trade_mutex;
+    std::map<std::string, int> m_combo_leg_volume;   // 合约 -> 累计成交手数
+    std::map<std::string, std::string> m_combo_leg_direction; // 合约 -> 首次成交方向
 
 private:
     void OnFrontConnected(){
@@ -214,6 +221,15 @@ private:
             << " OrderStatus:" << pOrder->OrderStatus << " StatusMsg:" << u8(pOrder->StatusMsg) << std::endl;
     }
     void OnRtnTrade(CThostFtdcTradeField* pTrade) {
+        ++m_rtn_trade_count;
+        // 自检只统计组合单（OrderRef=2000）的分腿成交：普通单/条件单/期权的成交不能污染组合判定
+        if (std::strcmp(pTrade->OrderRef, "2000") == 0)
+        {
+            std::lock_guard<std::mutex> guard(m_combo_trade_mutex);
+            m_combo_leg_volume[pTrade->InstrumentID] += pTrade->Volume;
+            m_combo_leg_direction.emplace(pTrade->InstrumentID,
+                pTrade->Direction == THOST_FTDC_D_Buy ? "买入" : "卖出");
+        }
         std::cout << "\n收到成交通知! " << " UserID:" << pTrade->UserID
             << " InstrumentID:" << pTrade->InstrumentID
             << " Direction:" << (pTrade->Direction == THOST_FTDC_D_Buy ? "买入":"卖出")
@@ -229,8 +245,10 @@ private:
 };
 
 
-int main()
+int main(int argc, char** argv)
 {
+    // --auto：无人值守模式（跳过所有 std::cin），跑完打印自检结果后退出
+    const bool auto_mode = (argc > 1 && std::strcmp(argv[1], "--auto") == 0);
     int i;
     pApi = CThostFtdcTraderApi::CreateFtdcTraderApi();
     std::cout << pApi->GetApiVersion() << std::endl;
@@ -239,8 +257,13 @@ int main()
     pApi->RegisterSpi(&spi);
     pApi->Init();
 
-    std::cout << "请输入任意数字以登录..." << std::endl;
-    std::cin >> i;
+    if (!auto_mode) {
+        std::cout << "请输入任意数字以登录..." << std::endl;
+        std::cin >> i;
+    } else {
+        std::cout << "[AUTO] 跳过交互输入，自动登录" << std::endl;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
     //等待认证回调完成, 否则ReqUserLogin会因尚未认证而失败
     while (!spi.m_authenticated)
     {
@@ -293,18 +316,20 @@ int main()
     strcpy(md.UpdateTime, "10:55:59");
     pApi->RegisterFensUserInfo((CThostFtdcFensUserInfoField*)&md);//喂一个行情快照给API
 
-    InputOrder = generateNewOrderMsg("1000", "SPD MA509&MA511");
+    InputOrder = generateNewOrderMsg("2000", "SPD MA509&MA511");
     InputOrder.LimitPrice = -985;//实际会以1010-2000 = (-990)元的差价成交
-    InputOrder.IsSwapOrder = 1;//互换单
+    // 真实 CTP 的套利单（SP/SPD）两条腿都是开仓（一多一空），不是互换单；
+    // 互换单(IsSwapOrder=1)要求第二腿已有持仓，用在开仓组合单上会被本地柜台拒掉。
+    InputOrder.IsSwapOrder = 0;
     ret = pApi->ReqOrderInsert(&InputOrder, 109);//有行情数据后,再下一单(买入开仓成交)
 
-    strcpy(InputOrder.OrderRef, "1001");
+    strcpy(InputOrder.OrderRef, "2001");
     InputOrder.Direction = THOST_FTDC_D_Sell;
     InputOrder.CombOffsetFlag[0] = THOST_FTDC_OF_Close;
     //    InputOrder.LimitPrice = -1111;//卖出时价格足够低则会成交
     ret = pApi->ReqOrderInsert(&InputOrder, 109);//有行情数据后,再下一单(卖出平仓)
 
-    auto InputOrderAction = generateCancelOrderMsg("1001", "SPD MA509&MA511", g_frontID, g_sessionID);
+    auto InputOrderAction = generateCancelOrderMsg("2001", "SPD MA509&MA511", g_frontID, g_sessionID);
     ret = pApi->ReqOrderAction(&InputOrderAction, 110);//把这个单子撤掉
 
     InputOrder = generateNewOrderMsg("1002", "MA509");
@@ -364,11 +389,54 @@ int main()
     strcpy(md.UpdateTime, "09:00:00");
     pApi->RegisterFensUserInfo((CThostFtdcFensUserInfoField*)&md);//喂一个(晚于应执行结算的时间的)行情快照给API(让API进行结算)(仅限回测模式)
 
-    std::cin >> i;
-    std::cout << ret << std::endl;
+    if (!auto_mode) {
+        std::cin >> i;
+        std::cout << ret << std::endl;
+        pApi->Release();
+        std::cin >> i;
+        return 0;
+    }
+
+    // --auto 自检：轮询等两腿成对回报到齐（最多 5s，避免固定等待不足/过长），
+    // 再打印组合单分腿成交汇总并断言两腿各 1 手、方向相反。
+    for (int wait_round = 0; wait_round < 100; ++wait_round)
+    {
+        bool both_legs_seen = false;
+        {
+            std::lock_guard<std::mutex> guard(spi.m_combo_trade_mutex);
+            both_legs_seen = spi.m_combo_leg_volume.count("MA509") > 0 &&
+                spi.m_combo_leg_volume.count("MA511") > 0;
+        }
+        if (both_legs_seen)
+        {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    std::cout << "\n[AUTO] 成交通知条数=" << spi.m_rtn_trade_count.load() << std::endl;
+    bool combo_ok = false;
+    {
+        std::lock_guard<std::mutex> guard(spi.m_combo_trade_mutex);
+        for (const auto& kv : spi.m_combo_leg_volume)
+        {
+            const auto it_direction = spi.m_combo_leg_direction.find(kv.first);
+            std::cout << "[AUTO] 分腿成交 " << kv.first << " 累计手数=" << kv.second
+                << " 方向=" << (it_direction == spi.m_combo_leg_direction.end() ? "?" : it_direction->second)
+                << std::endl;
+        }
+        // 全部读取都在同一把锁内用局部变量完成，不用 operator[]（会插入并产生数据竞争）
+        const auto it_vol1 = spi.m_combo_leg_volume.find("MA509");
+        const auto it_vol2 = spi.m_combo_leg_volume.find("MA511");
+        const auto it_dir1 = spi.m_combo_leg_direction.find("MA509");
+        const auto it_dir2 = spi.m_combo_leg_direction.find("MA511");
+        combo_ok = it_vol1 != spi.m_combo_leg_volume.end() && it_vol2 != spi.m_combo_leg_volume.end() &&
+            it_dir1 != spi.m_combo_leg_direction.end() && it_dir2 != spi.m_combo_leg_direction.end() &&
+            it_vol1->second == 1 && it_vol2->second == 1 &&
+            it_dir1->second != it_dir2->second;
+    }
+    std::cout << "[AUTO] 组合单分腿成对回报检查: " << (combo_ok ? "PASS" : "FAIL") << std::endl;
     pApi->Release();
-    std::cin >> i;
-    return 0;
+    return combo_ok ? 0 : 1;
 }
 
 // 运行程序: Ctrl + F5 或调试 >“开始执行(不调试)”菜单
